@@ -1,0 +1,156 @@
+// pages/index.js
+import { useEffect, useState } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { Program, Provider } from '@project-serum/anchor';
+import { create } from 'ipfs-http-client';
+
+const programID = new PublicKey('YOUR_PROGRAM_ID');
+const opts = {
+  preflightCommitment: 'processed'
+};
+
+export default function Home() {
+  const wallet = useWallet();
+  const [books, setBooks] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const getProvider = () => {
+    const connection = new Connection(process.env.NEXT_PUBLIC_SOLANA_RPC_URL);
+    const provider = new Provider(connection, wallet, opts);
+    return provider;
+  };
+
+  const getAllBooks = async () => {
+    try {
+      setLoading(true);
+      const provider = getProvider();
+      const program = new Program(idl, programID, provider);
+
+      const allBooks = await program.account.book.all();
+      setBooks(allBooks.map(book => ({
+        ...book.account,
+        publicKey: book.publicKey
+      })));
+    } catch (error) {
+      console.error('Error fetching books:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addBook = async (bookData) => {
+    try {
+      setLoading(true);
+      const provider = getProvider();
+      const program = new Program(idl, programID, provider);
+
+      // Upload to IPFS
+      const ipfs = create({
+        host: 'ipfs.infura.io',
+        port: 5001,
+        protocol: 'https'
+      });
+
+      const result = await ipfs.add(JSON.stringify({
+        title: bookData.title,
+        author: bookData.author,
+        description: bookData.description,
+        coverImage: bookData.coverImage
+      }));
+
+      // Get user's location
+      const position = await getCurrentPosition();
+      const location = [position.coords.latitude, position.coords.longitude];
+
+      // Add book to Solana
+      await program.rpc.addBook(
+        bookData.title,
+        bookData.author,
+        bookData.description,
+        result.path,
+        location,
+        {
+          accounts: {
+            book: null, // Generate new account
+            user: null, // User account
+            platform: null, // Platform account
+            authority: provider.wallet.publicKey,
+            systemProgram: SystemProgram.programId,
+          },
+        }
+      );
+
+      getAllBooks();
+    } catch (error) {
+      console.error('Error adding book:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const borrowBook = async (bookPubkey) => {
+    try {
+      setLoading(true);
+      const provider = getProvider();
+      const program = new Program(idl, programID, provider);
+
+      await program.rpc.borrowBook({
+        accounts: {
+          book: bookPubkey,
+          borrower: null, // User account
+          authority: provider.wallet.publicKey,
+        },
+      });
+
+      getAllBooks();
+    } catch (error) {
+      console.error('Error borrowing book:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (wallet.connected) {
+      getAllBooks();
+    }
+  }, [wallet.connected]);
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <header className="flex justify-between items-center mb-8">
+        <h1 className="text-3xl font-bold">Chain.Book</h1>
+        <WalletMultiButton />
+      </header>
+
+      {wallet.connected ? (
+        <div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {books.map((book) => (
+              <div key={book.publicKey.toString()} className="border rounded-lg p-4">
+                <h3 className="text-xl font-semibold">{book.title}</h3>
+                <p className="text-gray-600">{book.author}</p>
+                <p className="mt-2">{book.description}</p>
+                <div className="mt-4">
+                  <button
+                    onClick={() => borrowBook(book.publicKey)}
+                    disabled={!book.isAvailable}
+                    className="bg-blue-500 text-white px-4 py-2 rounded"
+                  >
+                    {book.isAvailable ? 'Borrow' : 'Not Available'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="text-center">
+          <p>Please connect your wallet to continue</p>
+        </div>
+      )}
+    </div>
+  );
+}

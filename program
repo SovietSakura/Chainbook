@@ -1,0 +1,221 @@
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Token};
+
+declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+
+#[program]
+pub mod chain_book {
+    use super::*;
+
+    // 初始化图书共享平台
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let platform = &mut ctx.accounts.platform;
+        platform.authority = ctx.accounts.authority.key();
+        platform.total_books = 0;
+        platform.total_users = 0;
+        Ok(())
+    }
+
+    // 用户注册
+    pub fn register_user(ctx: Context<RegisterUser>, location: [f64; 2]) -> Result<()> {
+        let user = &mut ctx.accounts.user;
+        let platform = &mut ctx.accounts.platform;
+
+        user.authority = ctx.accounts.authority.key();
+        user.reputation = 100;
+        user.share_count = 0;
+        user.borrow_count = 0;
+        user.is_active = true;
+        user.location = location;
+        
+        platform.total_users += 1;
+        Ok(())
+    }
+
+    // 添加图书
+    pub fn add_book(
+        ctx: Context<AddBook>,
+        title: String,
+        author: String,
+        description: String,
+        ipfs_hash: String,
+        location: [f64; 2]
+    ) -> Result<()> {
+        let book = &mut ctx.accounts.book;
+        let user = &mut ctx.accounts.user;
+        let platform = &mut ctx.accounts.platform;
+
+        book.owner = ctx.accounts.authority.key();
+        book.title = title;
+        book.author = author;
+        book.description = description;
+        book.ipfs_hash = ipfs_hash;
+        book.is_available = true;
+        book.borrow_count = 0;
+        book.rating = 0;
+        book.rating_count = 0;
+        book.location = location;
+
+        user.share_count += 1;
+        platform.total_books += 1;
+
+        Ok(())
+    }
+
+    // 借阅图书
+    pub fn borrow_book(ctx: Context<BorrowBook>) -> Result<()> {
+        let book = &mut ctx.accounts.book;
+        let borrower = &mut ctx.accounts.borrower;
+        
+        require!(book.is_available, CustomError::BookNotAvailable);
+        require!(book.owner != ctx.accounts.authority.key(), CustomError::CannotBorrowOwnBook);
+
+        book.is_available = false;
+        book.borrow_count += 1;
+        book.current_borrower = Some(ctx.accounts.authority.key());
+        book.borrow_time = Clock::get()?.unix_timestamp;
+
+        borrower.borrow_count += 1;
+
+        Ok(())
+    }
+
+    // 归还图书
+    pub fn return_book(ctx: Context<ReturnBook>, rating: u8) -> Result<()> {
+        let book = &mut ctx.accounts.book;
+        let borrower = &mut ctx.accounts.borrower;
+
+        require!(rating >= 1 && rating <= 5, CustomError::InvalidRating);
+        require!(
+            book.current_borrower == Some(ctx.accounts.authority.key()),
+            CustomError::NotBorrower
+        );
+
+        let current_time = Clock::get()?.unix_timestamp;
+        let borrow_duration = current_time - book.borrow_time;
+        
+        // 更新信用分
+        if borrow_duration <= 30 * 24 * 60 * 60 {  // 30天
+            borrower.reputation = borrower.reputation.saturating_add(1);
+        } else {
+            borrower.reputation = borrower.reputation.saturating_sub(5);
+        }
+
+        book.is_available = true;
+        book.current_borrower = None;
+        book.rating += rating as u32;
+        book.rating_count += 1;
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = authority, space = 8 + Platform::LEN)]
+    pub platform: Account<'info, Platform>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RegisterUser<'info> {
+    #[account(init, payer = authority, space = 8 + User::LEN)]
+    pub user: Account<'info, User>,
+    #[account(mut)]
+    pub platform: Account<'info, Platform>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AddBook<'info> {
+    #[account(init, payer = authority, space = 8 + Book::LEN)]
+    pub book: Account<'info, Book>,
+    #[account(mut, has_one = authority)]
+    pub user: Account<'info, User>,
+    #[account(mut)]
+    pub platform: Account<'info, Platform>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BorrowBook<'info> {
+    #[account(mut)]
+    pub book: Account<'info, Book>,
+    #[account(mut, has_one = authority)]
+    pub borrower: Account<'info, User>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReturnBook<'info> {
+    #[account(mut)]
+    pub book: Account<'info, Book>,
+    #[account(mut, has_one = authority)]
+    pub borrower: Account<'info, User>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[account]
+pub struct Platform {
+    pub authority: Pubkey,
+    pub total_books: u64,
+    pub total_users: u64,
+}
+
+#[account]
+pub struct User {
+    pub authority: Pubkey,
+    pub reputation: u32,
+    pub share_count: u32,
+    pub borrow_count: u32,
+    pub is_active: bool,
+    pub location: [f64; 2],
+}
+
+#[account]
+pub struct Book {
+    pub owner: Pubkey,
+    pub title: String,
+    pub author: String,
+    pub description: String,
+    pub ipfs_hash: String,
+    pub is_available: bool,
+    pub current_borrower: Option<Pubkey>,
+    pub borrow_time: i64,
+    pub borrow_count: u32,
+    pub rating: u32,
+    pub rating_count: u32,
+    pub location: [f64; 2],
+}
+
+#[error_code]
+pub enum CustomError {
+    #[msg("Book is not available")]
+    BookNotAvailable,
+    #[msg("Cannot borrow your own book")]
+    CannotBorrowOwnBook,
+    #[msg("Invalid rating")]
+    InvalidRating,
+    #[msg("Not the borrower")]
+    NotBorrower,
+}
+
+impl Platform {
+    pub const LEN: usize = 8 + 32 + 8 + 8;
+}
+
+impl User {
+    pub const LEN: usize = 8 + 32 + 4 + 4 + 4 + 1 + 16;
+}
+
+impl Book {
+    pub const LEN: usize = 8 + 32 + 200 + 100 + 500 + 46 + 1 + 33 + 8 + 4 + 4 + 4 + 16;
+}
